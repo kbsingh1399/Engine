@@ -1,0 +1,207 @@
+"""
+================================================================================
+CANONICAL MARKET DATA SCHEMA & COLUMN SPECIFICATIONS
+================================================================================
+Single source of truth for the dual-table Parquet contract:
+
+  Table 1  {symbol}_15m_master_2020_2026.parquet   (one row per 15m candle)
+  Table 2  {symbol}_15m_footprint_ladder.parquet   (one row per price rung per candle)
+
+Backward compatibility contract
+-------------------------------
+The first 62 entries of CANONICAL_COLUMNS are byte-for-byte identical (name,
+order, dtype) to the legacy schema consumed by quant_strategy_suite.py,
+run_expanding_walkforward_ml.py, trend_orderflow_features.py and the live
+monitor. New features are only ever APPENDED after ``metrics_available``.
+================================================================================
+"""
+
+from typing import Dict, List, Tuple
+
+BAR_MS: int = 900_000                      # 15 minutes
+DAY_MS: int = 86_400_000
+MASTER_FILENAME_TEMPLATE = "{symbol}_15m_master_2020_2026.parquet"
+LADDER_FILENAME_TEMPLATE = "{symbol}_15m_footprint_ladder.parquet"
+MANIFEST_FILENAME_TEMPLATE = "{symbol}_dataset_manifest.json"
+
+# ------------------------------------------------------------------------------
+# Numeric precision policy (decimal places). Prices are stored at Binance's
+# maximum tick precision so sub-dollar assets (DOGE, TRX, ADA...) never collapse.
+# ------------------------------------------------------------------------------
+PRICE_DP: int = 8
+COIN_DP: int = 8
+USD_DP: int = 2
+RATIO_DP: int = 6
+PCT_DP: int = 6
+
+# ------------------------------------------------------------------------------
+# CVD Lifetime Rounding Contract (R3-C2 Invariant):
+# Both future_cvd_15m and spot_cvd_15m are quantized to COIN_DP (8 decimal places)
+# per bar. future_cvd_lifetime and spot_cvd_lifetime are defined as the exact
+# cumulative sum of these quantized deltas:
+#   future_cvd_lifetime[t] = np.round(future_cvd_lifetime[t-1] + future_cvd_15m[t], COIN_DP)
+# This mathematical contract applies identically in both full-rebuild and
+# incremental-append paths, guaranteeing atol=0.0 bit-parity across all bars.
+# ------------------------------------------------------------------------------
+
+CANONICAL_COLUMNS: List[str] = [
+    # 1. Timestamps & Identification
+    "open_time_ms",           # int64  candle open, Unix ms
+    "close_time_ms",          # int64  candle close, Unix ms (= open + 899_999)
+    "datetime_utc",           # string "YYYY-MM-DD HH:MM:SS" of open
+    "symbol",                 # string
+    # 2. OHLCV Core (100% Raw Binance Futures)
+    "open", "high", "low", "close",
+    "volume_base",            # float64 base-asset volume
+    "volume_quote",           # float64 USDT volume
+    "volume_sma9",            # float64 9-bar SMA of quote volume
+    "trade_count",            # int64
+    # 3. Momentum & Volatility (Deterministic Math)
+    "rsi_14", "atr_14", "atr_100",
+    # 4. EMAs (Mathematical trendlines)
+    "ema_8", "ema_21", "ema_50", "ema_200", "ema_800",
+    # 5. CVD (100% Real Binance Futures Taker Flow)
+    "future_cvd_15m", "future_cvd_session", "future_cvd_lifetime",
+    # 6. Spot CVD (100% Real Binance Spot Taker Flow)
+    "spot_cvd_15m", "spot_cvd_session", "spot_cvd_lifetime",
+    # 7. Funding & Basis
+    "funding_rate_pct",       # float64 last settled 8h rate in percent, ffilled
+    "basis_usd",              # float64 futures close - spot close
+    # 8. Open Interest (100% Real Binance Derivatives Metrics)
+    "open_interest_k",        # float64 OI in thousands of contracts (coins)
+    "open_interest_usd",
+    "oi_change_pct",          # float64 15m pct change of OI
+    # 9. Liquidations (Calibrated Institutional Liquidation Model)
+    "long_liq_usd", "short_liq_usd",
+    # 10. Positioning (100% Real Binance Accounts Metrics)
+    "ls_ratio_global",        # global account long/short ratio
+    "ls_ratio_top",           # top-trader POSITION long/short ratio
+    "top_account_ratio",      # top-trader ACCOUNT long/short ratio
+    "whale_index",
+    "taker_volume_ratio",     # official taker buy/sell volume ratio
+    # 11. Session Value Area (Mathematical Volume Profiling)
+    "session_vah", "session_val", "prev_day_vah", "prev_day_val",
+    # 12. Trade Execution & Sizing (100% Real Binance Trades)
+    "taker_buy_count", "taker_sell_count",
+    "taker_buy_vol_btc", "taker_sell_vol_btc",
+    "avg_trade_size_usd",
+    # 13. Spot Ground Truth & Extended Features
+    "spot_close",             # float64 spot close matched 1:1 from Binance Spot
+    "session_vwap",           # float64 volume-weighted average price since 00:00 UTC
+    "vwap_zscore",            # float64 (close - vwap) / rolling_std(close - vwap, 24)
+    "volume_ratio",           # float64 volume_base / SMA9(volume_base)
+    "zc_div",                 # float64 spot_cvd_15m - future_cvd_15m
+    "long_liq_zs",            # float64 rolling-96 z-score of |long_liq_usd|
+    "short_liq_zs",           # float64 rolling-96 z-score of short_liq_usd
+    "liq_imbalance_ratio",    # float64 (short - |long|) / (short + |long|) in [-1, 1]
+    "is_imputed_metrics",     # int8 1 = ex-post data-quality quarantine (official metrics missing/frozen/imputed, e.g. 2022 API outage or Binance reporting halt). RETROSPECTIVE ONLY: not for contemporaneous live signals.
+]
+
+# Backward compatibility aliases
+LEGACY_COLUMNS: List[str] = CANONICAL_COLUMNS
+EXTENDED_COLUMNS: List[str] = []
+
+COLUMN_DTYPES: Dict[str, str] = {
+    "open_time_ms": "int64", "close_time_ms": "int64",
+    "datetime_utc": "string", "symbol": "string",
+    "is_imputed_metrics": "int8",
+    "trade_count": "int64", "taker_buy_count": "int64", "taker_sell_count": "int64",
+}
+for _c in CANONICAL_COLUMNS:
+    COLUMN_DTYPES.setdefault(_c, "float64")
+
+STRING_VOCAB: Dict[str, Tuple[str, ...]] = {}
+
+# Columns that are legitimately constant over long stretches
+ALLOWED_CONSTANT_COLUMNS: Tuple[str, ...] = (
+    "symbol", "is_imputed_metrics",
+)
+
+# ------------------------------------------------------------------------------
+# Fixed Institutional Price Merge Levels (Deterministic Order Flow Geometry)
+# ------------------------------------------------------------------------------
+FIXED_MERGE_STEPS: Dict[str, float] = {
+    "BTCUSDT": 25.0,        # Standard Exocharts / Sierra Chart $25 bucket
+    "ETHUSDT": 1.0,         # Standard Exocharts / Sierra Chart $1 bucket
+    "SOLUSDT": 0.10,        # Sub-dollar microstructure (10 cents)
+    "BNBUSDT": 0.50,        # Half-dollar bucket
+    "DOGEUSDT": 0.0005,     # 5-pip bucket
+    "XRPUSDT": 0.0010,      # 10-pip bucket
+    "ADAUSDT": 0.0005,      # 5-pip bucket
+    "TRXUSDT": 0.0001,      # Single pip bucket
+    "LINKUSDT": 0.02,       # 2-cent bucket
+    "AVAXUSDT": 0.05,       # 5-cent bucket
+    "SUIUSDT": 0.005,       # Half-cent bucket
+    "NEARUSDT": 0.01,       # 1-cent bucket
+    "DOTUSDT": 0.01,        # 1-cent bucket
+    "LTCUSDT": 0.10,        # 10-cent bucket
+    "BCHUSDT": 0.50,        # Half-dollar bucket
+    "APTUSDT": 0.01,        # 1-cent bucket
+    "OPUSDT": 0.005,        # Half-cent bucket
+    "ARBUSDT": 0.002,       # 2-tenth cent bucket
+}
+
+# ------------------------------------------------------------------------------
+# Table 2: 100% Real Empirical Footprint Ladder (13 Columns)
+# ------------------------------------------------------------------------------
+LADDER_COLUMNS: List[str] = [
+    "open_time_ms",        # int64  FK -> Table 1 15m candle timestamp
+    "price_bin",           # float64 fixed price rung (e.g. 65000.0, 65025.0)
+    "bid_vol_coin",        # float64 aggressive sell volume into bid
+    "ask_vol_coin",        # float64 aggressive buy volume into ask
+    "net_delta_coin",      # float64 ask_vol - bid_vol
+    "total_vol_coin",      # float64 ask_vol + bid_vol
+    "trade_count",         # int64  trade count executed at this rung
+    "is_poc",              # int8   1 if Point of Control of this 15m candle, else 0
+    "is_buy_imbalance",    # int8   1 if diagonal buy imbalance >= 3:1 with notional floor
+    "is_sell_imbalance",   # int8   1 if diagonal sell imbalance >= 3:1 with notional floor
+    "is_stacked_buy_imb",  # int8   1 if part of >= 3 stacked buy imbalance cluster
+    "is_stacked_sell_imb", # int8   1 if part of >= 3 stacked sell imbalance cluster
+    "is_value_area",       # int8   1 if within 70% Value Area (VAH to VAL)
+]
+LADDER_DTYPES: Dict[str, str] = {
+    "open_time_ms": "int64", "price_bin": "float64", "bid_vol_coin": "float64",
+    "ask_vol_coin": "float64", "net_delta_coin": "float64", "total_vol_coin": "float64",
+    "trade_count": "int64", "is_poc": "int8", "is_buy_imbalance": "int8",
+    "is_sell_imbalance": "int8", "is_stacked_buy_imb": "int8", "is_stacked_sell_imb": "int8",
+    "is_value_area": "int8",
+}
+RUNG_SOURCE_TICK: int = 0
+RUNG_SOURCE_SYNTHETIC: int = 1
+
+
+# ------------------------------------------------------------------------------
+# Universe
+# ------------------------------------------------------------------------------
+SYMBOLS: List[str] = [
+    "BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "BNBUSDT",
+    "DOGEUSDT", "ADAUSDT", "TRXUSDT", "LINKUSDT", "AVAXUSDT",
+    "SUIUSDT", "NEARUSDT", "DOTUSDT", "LTCUSDT", "BCHUSDT",
+    "APTUSDT", "OPUSDT", "ARBUSDT",
+]
+
+# First trading day of each USDT-M perpetual. Used to bound archive scans and to
+# start EMA warm-up as early as history allows.
+FUTURES_LISTING_DATES: Dict[str, str] = {
+    "BTCUSDT": "2019-09-08", "ETHUSDT": "2019-11-27", "XRPUSDT": "2020-01-06",
+    "SOLUSDT": "2020-09-14", "BNBUSDT": "2020-02-10", "DOGEUSDT": "2020-07-10",
+    "ADAUSDT": "2020-01-31", "TRXUSDT": "2020-01-15", "LINKUSDT": "2020-01-17",
+    "AVAXUSDT": "2020-09-23", "SUIUSDT": "2023-05-03", "NEARUSDT": "2020-10-15",
+    "DOTUSDT": "2020-08-18", "LTCUSDT": "2020-01-09", "BCHUSDT": "2020-01-15",
+    "APTUSDT": "2022-10-19", "OPUSDT": "2022-06-01", "ARBUSDT": "2023-03-23",
+}
+
+DEFAULT_START_DATE: str = "2020-09-01"
+WARMUP_START_DATE: str = "2019-09-01"
+
+
+def master_filename(symbol: str) -> str:
+    return MASTER_FILENAME_TEMPLATE.format(symbol=symbol)
+
+
+def ladder_filename(symbol: str) -> str:
+    return LADDER_FILENAME_TEMPLATE.format(symbol=symbol)
+
+
+def manifest_filename(symbol: str) -> str:
+    return MANIFEST_FILENAME_TEMPLATE.format(symbol=symbol)

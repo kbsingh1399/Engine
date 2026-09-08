@@ -1,0 +1,21 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Large Parquet Backtesting Data
+binance_backtesting_data/
+binance_backtesting_data_backup/
+data_cache/
+cache/
+*.parquet
+
+# Virtual environments
+.env
+.venv/
+venv/
+
+# Temporary / logs
+*.log
+*.tmp
+temp_metrics.csv
